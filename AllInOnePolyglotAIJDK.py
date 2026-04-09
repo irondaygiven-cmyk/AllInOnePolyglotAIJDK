@@ -12,10 +12,11 @@ import gzip
 import json
 from datetime import datetime
 
-WHEELS_DIR = r"H:\Models-D1\wheels"
-
 # Resolve the script directory once, robustly, before any re-exec happens.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Wheels are stored alongside this script in the base folder.
+WHEELS_DIR = _SCRIPT_DIR
 
 
 def ensure_venv_and_deps():
@@ -40,19 +41,28 @@ def ensure_venv_and_deps():
         print("Creating virtual environment...")
         venv.create(venv_dir, with_pip=True)
 
-    print("Upgrading pip...")
-    subprocess.check_call([venv_pip, "install", "--upgrade", "pip", "setuptools", "wheel"])
+    # Wheels shipped with the repo (Windows x64 / pure-Python).
+    # onnx-*.manylinux*.whl is Linux-only and intentionally excluded.
+    LOCAL_WHEELS = [
+        "setuptools-82.0.1-py3-none-any.whl",
+        "huggingface_hub-0.36.2-py3-none-any.whl",
+        "llama_cpp_python-0.1.66+cu121-cp311-cp311-win_amd64.whl",
+        "torchvision-0.21.0-cp311-cp311-win_amd64.whl",
+    ]
+
+    print("Upgrading pip and wheel...")
+    subprocess.check_call([venv_pip, "install", "--upgrade", "pip", "wheel"])
 
     print("Installing PySide6 and requests...")
     subprocess.check_call([venv_pip, "install", "PySide6", "requests"])
 
-    # Install local huggingface_hub wheel
-    wheel_path = os.path.join(WHEELS_DIR, "huggingface_hub-0.36.2-py3-none-any.whl")
-    if os.path.exists(wheel_path):
-        print("Installing local huggingface_hub wheel...")
-        subprocess.check_call([venv_pip, "install", wheel_path])
-    else:
-        print(f"Warning: Local wheel not found at {wheel_path}")
+    for wheel_name in LOCAL_WHEELS:
+        wheel_path = os.path.join(WHEELS_DIR, wheel_name)
+        if os.path.exists(wheel_path):
+            print(f"Installing local wheel: {wheel_name}")
+            subprocess.check_call([venv_pip, "install", wheel_path])
+        else:
+            print(f"Warning: Local wheel not found: {wheel_path}")
 
     print("Restarting inside virtual environment...")
     os.execv(venv_python, [venv_python, os.path.abspath(__file__)] + sys.argv[1:])
