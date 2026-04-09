@@ -1,0 +1,6 @@
+module components
+TitleBar 2.15 TitleBar.qml
+GlassCard 2.15 GlassCard.qml
+ChatBubble 2.15 ChatBubble.qml
+EnvironmentPills 2.15 EnvironmentPills.qml
+ModernButton 2.15 ModernButton.qml

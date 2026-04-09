@@ -1,0 +1,4 @@
+module views
+DevToolsView 2.15 DevToolsView.qml
+BuildToolsView 2.15 BuildToolsView.qml
+SettingsView 2.15 SettingsView.qml
