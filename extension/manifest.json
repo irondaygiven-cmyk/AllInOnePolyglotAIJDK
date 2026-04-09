@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "AllInOnePolyglotAIJDK DevTools Bridge",
+  "version": "3.3",
+  "description": "Enables realtime DevTools control from AllInOnePolyglotAIJDK",
+  "permissions": ["debugger", "activeTab", "tabs"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "externally_connectable": {
+    "ids": ["*"]
+  }
+}
