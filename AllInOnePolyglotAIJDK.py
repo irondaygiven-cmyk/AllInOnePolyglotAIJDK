@@ -53,8 +53,8 @@ def ensure_venv_and_deps():
     print("Upgrading pip and wheel...")
     subprocess.check_call([venv_pip, "install", "--upgrade", "pip", "wheel"])
 
-    print("Installing PySide6 and requests...")
-    subprocess.check_call([venv_pip, "install", "PySide6", "requests"])
+    print("Installing PySide6, requests, and slint...")
+    subprocess.check_call([venv_pip, "install", "PySide6", "requests", "slint"])
 
     for wheel_name in LOCAL_WHEELS:
         wheel_path = os.path.join(WHEELS_DIR, wheel_name)

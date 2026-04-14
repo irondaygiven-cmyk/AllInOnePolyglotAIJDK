@@ -432,9 +432,9 @@ class ManagerApp:
             pip("install", ext_pip)
         pip("install", "--upgrade", "pip", "wheel")
 
-        # PySide6 + requests (online)
-        out("Installing PySide6 and requests…")
-        pip("install", "PySide6", "requests")
+        # PySide6 + requests + slint (online)
+        out("Installing PySide6, requests, and slint…")
+        pip("install", "PySide6", "requests", "slint")
 
         # Bundled wheels
         for whl in _BUNDLED_WHEELS:
