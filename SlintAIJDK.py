@@ -379,6 +379,10 @@ def main() -> None:
     # Path: slint.load_file(path) → compiled Slint file → component dict
     components = slint.load_file(_SLINT_FILE)
 
+    # ChatMessage is the exported struct; use it instead of the abstract slint.Struct base.
+    # This ensures type-safe construction that matches the struct definition in main.slint.
+    ChatMessage = components.ChatMessage
+
     # Instantiate the root window component (defined in main.slint)
     window = components.MainWindow()
 
@@ -463,8 +467,9 @@ def main() -> None:
     # ── UI helper functions ────────────────────────────────────────────────────
 
     def append_message(text: str, is_user: bool) -> None:
-        # Path: Python Struct → messages list → window.chat_messages → Slint re-render
-        messages.append(slint.Struct({"text": text, "is-user": is_user}))
+        # Use the exported ChatMessage struct for type-safe construction.
+        # Path: ChatMessage → messages list → window.chat_messages → Slint re-render
+        messages.append(ChatMessage(text=text, is_user=is_user))
         window.chat_messages = messages
 
     def append_log(line: str) -> None:
