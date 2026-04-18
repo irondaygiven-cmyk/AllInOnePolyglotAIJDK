@@ -123,20 +123,21 @@ def main():
     backend.load_libraries()
 
     components = slint.load_file(_SLINT_FILE)
+    # ChatMessage is the exported struct; use it instead of the abstract slint.Struct base.
+    ChatMessage = components.ChatMessage
     window = components.MainWindow()
 
     # Keep a local copy of the message list that we append to.
     messages = []
 
     def append_message(text: str, is_user: bool):
-        messages.append(slint.Struct({"text": text, "is-user": is_user}))
+        messages.append(ChatMessage(text=text, is_user=is_user))
         window.chat_messages = messages
 
     def append_log(line: str):
         current = window.deploy_log or ""
         window.deploy_log = (current + "\n" + line).strip()
 
-    @window.send_message
     def on_send_message(text: str):
         if not text.strip():
             return
@@ -147,10 +148,13 @@ def main():
         append_log(f"[agent] responded ({len(reply)} chars)")
         window.status_text = "Ready"
 
-    @window.set_environment
     def on_set_environment(env: str):
         backend.current_environment = env
         append_log(f"Environment set to: {env}")
+
+    # Assign callbacks via direct property assignment (slint Python API).
+    window.send_message = on_send_message
+    window.set_environment = on_set_environment
 
     window.run()
 

@@ -1,7 +1,7 @@
 // AllInOnePolyglotAIJDK - Slint UI
 // Mirrors the core chat + environment + deploy-log layout of the QML version.
 
-import { Button, LineEdit, ScrollView, ListView, ComboBox } from "std-widgets.slint";
+import { Button, LineEdit, ScrollView, ComboBox } from "std-widgets.slint";
 
 export struct ChatMessage {
     text: string,
@@ -65,13 +65,16 @@ export component MainWindow inherits Window {
                         for msg in root.chat-messages: Rectangle {
                             background: msg.is-user ? #1a2a1a : #1a1a2a;
                             border-radius: 8px;
-                            padding: 10px;
 
-                            Text {
-                                text: msg.text;
-                                color: fg-text;
-                                font-size: 13px;
-                                wrap: word-wrap;
+                            VerticalLayout {
+                                padding: 10px;
+
+                                Text {
+                                    text: msg.text;
+                                    color: fg-text;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
+                                }
                             }
                         }
                     }
