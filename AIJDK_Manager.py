@@ -30,6 +30,7 @@ _VENV_DIR   = os.path.join(_SCRIPT_DIR, ".venv")
 _VENV_PY    = os.path.join(_VENV_DIR, "Scripts", "python.exe")
 _VENV_PIP   = os.path.join(_VENV_DIR, "Scripts", "pip.exe")
 _MAIN_PY    = os.path.join(_SCRIPT_DIR, "AllInOnePolyglotAIJDK.py")
+_SLINT_PY   = os.path.join(_SCRIPT_DIR, "SlintAIJDK.py")
 
 # Wheels bundled in the repo root
 _BUNDLED_WHEELS = [
@@ -91,6 +92,7 @@ class ManagerApp:
         self.root = root
         self._busy = False
         self._app_proc: subprocess.Popen | None = None
+        self._slint_proc: subprocess.Popen | None = None
 
         self._build_ui()
         self._refresh_status()
@@ -255,11 +257,20 @@ class ManagerApp:
 
         btn_row = tk.Frame(parent, bg=BG)
         btn_row.pack(pady=12)
-        self._btn_launch = self._btn(btn_row, "Launch AIJDK UI", self._do_launch)
+        self._btn_launch = self._btn(btn_row, "Launch AIJDK UI (PySide6)", self._do_launch)
         self._btn_launch.pack(side="left", padx=6)
-        self._btn_stop = self._btn(btn_row, "Stop", self._do_stop,
+        self._btn_stop = self._btn(btn_row, "Stop PySide6", self._do_stop,
                                    fg=FG_ERR, state="disabled")
         self._btn_stop.pack(side="left", padx=6)
+
+        slint_row = tk.Frame(parent, bg=BG)
+        slint_row.pack(pady=4)
+        self._btn_launch_slint = self._btn(slint_row, "Launch AIJDK UI (Slint)",
+                                           self._do_launch_slint)
+        self._btn_launch_slint.pack(side="left", padx=6)
+        self._btn_stop_slint = self._btn(slint_row, "Stop Slint", self._do_stop_slint,
+                                         fg=FG_ERR, state="disabled")
+        self._btn_stop_slint.pack(side="left", padx=6)
 
         tk.Label(parent, text="Output:", bg=BG, fg=FG_DIM,
                  font=FONT_UI).pack(anchor="w", padx=16)
@@ -331,12 +342,14 @@ class ManagerApp:
         # Disable/enable launch
         state = "normal" if venv_ok else "disabled"
         self._btn_launch.config(state=state)
+        self._btn_launch_slint.config(state=state)
 
     def _set_busy(self, busy: bool, btn: tk.Button | None = None):
         self._busy = busy
         self._set_status("●  Running…" if busy else "●  Idle",
                          ACCENT if busy else FG_DIM)
-        for b in (self._btn_install, self._btn_link, self._btn_launch):
+        for b in (self._btn_install, self._btn_link, self._btn_launch,
+                  self._btn_launch_slint):
             b.config(state="disabled" if busy else "normal")
         if not busy:
             self._refresh_status()
@@ -419,9 +432,9 @@ class ManagerApp:
             pip("install", ext_pip)
         pip("install", "--upgrade", "pip", "wheel")
 
-        # PySide6 + requests (online)
-        out("Installing PySide6 and requests…")
-        pip("install", "PySide6", "requests")
+        # PySide6 + requests + slint (online)
+        out("Installing PySide6, requests, and slint…")
+        pip("install", "PySide6", "requests", "slint")
 
         # Bundled wheels
         for whl in _BUNDLED_WHEELS:
@@ -573,6 +586,68 @@ class ManagerApp:
             self._app_proc.terminate()
             self._log(self._launch_log, "Stop requested.", "warn")
         self._btn_stop.config(state="disabled")
+
+    # ── 4. Launch Slint UI ────────────────────────────────────────────────
+
+    def _do_launch_slint(self):
+        if self._busy:
+            return
+        if not os.path.isfile(_VENV_PY):
+            messagebox.showerror("Virtual environment not found",
+                                 "Please run Setup & Install first.")
+            return
+        if not os.path.isfile(_SLINT_PY):
+            messagebox.showerror("SlintAIJDK.py not found",
+                                 f"Could not find:\n{_SLINT_PY}")
+            return
+        if self._slint_proc and self._slint_proc.poll() is None:
+            messagebox.showinfo("Already running", "The Slint UI is already running.")
+            return
+
+        self._set_busy(True, self._btn_launch_slint)
+        self._btn_stop_slint.config(state="normal")
+        threading.Thread(target=self._launch_slint_worker, daemon=True).start()
+
+    def _launch_slint_worker(self):
+        log = self._launch_log
+
+        def out(msg, tag=None):
+            self._log(log, msg, tag)
+
+        out("=== Launching AllInOnePolyglotAIJDK Slint UI ===", "ok")
+        out(f"  Python : {_VENV_PY}")
+        out(f"  Script : {_SLINT_PY}")
+        out("")
+
+        try:
+            self._slint_proc = subprocess.Popen(
+                [_VENV_PY, _SLINT_PY],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=_SCRIPT_DIR,
+            )
+
+            for line in self._slint_proc.stdout:
+                tag = "err" if line.lower().startswith("error") else None
+                out(line.rstrip(), tag)
+
+            self._slint_proc.wait()
+            exit_code = self._slint_proc.returncode
+            tag = "ok" if exit_code == 0 else "err"
+            out(f"\nSlint process exited (code {exit_code}).", tag)
+        except Exception as e:
+            out(f"ERROR: {e}", "err")
+        finally:
+            self.root.after(0, lambda: self._btn_stop_slint.config(state="disabled"))
+            self._set_busy(False)
+
+    def _do_stop_slint(self):
+        if self._slint_proc and self._slint_proc.poll() is None:
+            self._slint_proc.terminate()
+            self._log(self._launch_log, "Slint stop requested.", "warn")
+        self._btn_stop_slint.config(state="disabled")
 
 
 # ---------------------------------------------------------------------------
