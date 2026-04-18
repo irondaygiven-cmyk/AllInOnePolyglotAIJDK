@@ -1,5 +1,6 @@
 // AllInOnePolyglotAIJDK - Slint UI
-// Unified GUI: AppState toggle + Status Console + Undo/Redo for persistent telemetry monitoring.
+// Unified GUI: AppState toggle + Status Console + Undo/Redo +
+//              Research / Pattern Synthesis module.
 //
 // ── Communication paths (Slint side) ────────────────────────────────────────
 //
@@ -24,7 +25,7 @@
 //        → Re-apply snapshot → window state restored
 //        Bounded to ±20 operations
 //
-//  Mode buttons (Planning / Development / Browser Dev)
+//  Mode buttons (Planning / Development / Browser Dev / Research)
 //    → set-app-state(AppState) callback → [Python] on_set_app_state
 //        → AIBackend.is_planning_mode toggled
 //        → deploy_log + telemetry_log updated
@@ -33,11 +34,28 @@
 //    → set-environment(env) callback → [Python] on_set_environment
 //        → AIBackend.current_environment updated
 //
+//  ── Research / Pattern Synthesis paths ──────────────────────────────────────
+//
+//  Browse / Select Target for Synthesis button  (Research mode)
+//    → select-synthesis-target() callback → [Python] on_select_synthesis_target
+//        → tkinter filedialog.askopenfilename()    [native file picker]
+//        → window.synthesis-target updated with chosen path
+//
+//  Begin Deconstruction button  (Research mode)
+//    → begin-deconstruction() callback → [Python] on_begin_deconstruction
+//        → SynthesisAgent(target, output_lib, progress_cb)
+//        → background thread: deconstruct()
+//            → dumpbin /EXPORTS or javap -c   [static analysis tool]
+//            → AI POST /chat/completions       [LM Studio pattern extraction]
+//            → JSON pattern file written to Learning_Library\Synthesized_Data\
+//            → progress_cb(msg) → window.synthesis-log appended (via Slint timer)
+//        → window.synthesis-busy = true while running, false when done
+//
 // ────────────────────────────────────────────────────────────────────────────
 
 import { Button, LineEdit, ScrollView, ComboBox, VerticalBox, HorizontalBox } from "std-widgets.slint";
 
-export enum AppState { Planning, Development, BrowserDev }
+export enum AppState { Planning, Development, BrowserDev, Research }
 
 export struct ChatMessage {
     text: string,
@@ -51,16 +69,25 @@ export component MainWindow inherits Window {
     background: #0a0a0a;
 
     // ── callbacks called from Python ─────────────────────────────────────────
-    // send-message  : [SEND button / Enter] → Python on_send_message → AI → reply
-    // set-environment: [ComboBox] → Python on_set_environment → AIBackend.current_environment
-    // set-app-state : [Mode buttons] → Python on_set_app_state → AIBackend.is_planning_mode
-    // undo-chat     : [↩ button] → Python on_undo_chat → UndoRedoStack.undo() → state restore
-    // redo-chat     : [↪ button] → Python on_redo_chat → UndoRedoStack.redo() → state restore
+    // send-message             : [SEND / Enter] → on_send_message → AI → reply
+    // set-environment          : [ComboBox]     → on_set_environment → backend
+    // set-app-state            : [Mode buttons] → on_set_app_state → backend
+    // undo-chat                : [↩ button]     → on_undo_chat → UndoRedoStack.undo()
+    // redo-chat                : [↪ button]     → on_redo_chat → UndoRedoStack.redo()
+    // select-synthesis-target  : [Browse button, Research mode]
+    //                            → on_select_synthesis_target → tkinter filedialog
+    //                            → synthesis-target property updated
+    // begin-deconstruction     : [Begin Deconstruction button, Research mode]
+    //                            → on_begin_deconstruction
+    //                            → SynthesisAgent.deconstruct() in a background thread
+    //                            → synthesis-log appended; synthesis-busy toggled
     callback send-message(string);
     callback set-environment(string);
     callback set-app-state(AppState);
-    callback undo-chat();   // restore previous chat state (up to 20 steps back)
-    callback redo-chat();   // re-apply undone chat state (up to 20 steps forward)
+    callback undo-chat();                 // restore previous chat state (up to 20 steps)
+    callback redo-chat();                 // re-apply undone chat state (up to 20 steps)
+    callback select-synthesis-target();   // open native file-picker; writes synthesis-target
+    callback begin-deconstruction();      // launch SynthesisAgent on synthesis-target
 
     // ── properties written from Python ───────────────────────────────────────
     in-out property <[ChatMessage]> chat-messages: [];
@@ -72,9 +99,14 @@ export component MainWindow inherits Window {
     // Drives the enabled state of the ↩/↪ buttons below.
     in-out property <bool> can-undo-chat: false;
     in-out property <bool> can-redo-chat: false;
+    // Research / Pattern Synthesis properties
+    in-out property <string> synthesis-target: "";    // path to target binary/script
+    in-out property <string> synthesis-log: "";       // streaming progress from SynthesisAgent
+    in-out property <bool>   synthesis-busy: false;   // true while deconstruction runs
 
     // ── colours ──────────────────────────────────────────────────────────────
     property <color> accent: #00ff9d;
+    property <color> accent-research: #00e0ff;  // cyan accent for Research mode
     property <color> bg-panel: #111111;
     property <color> fg-text: #e0e0e0;
 
@@ -83,6 +115,9 @@ export component MainWindow inherits Window {
         spacing: 10px;
 
         // ── TOP BAR: AppState toggle ──────────────────────────────────────────
+        // Communication: each button → set-app-state(AppState) → [Python] on_set_app_state
+        //                → AIBackend.is_planning_mode toggled (Planning only)
+        //                → deploy_log + telemetry_log updated
         HorizontalLayout {
             spacing: 8px;
             alignment: start;
@@ -118,11 +153,22 @@ export component MainWindow inherits Window {
                 }
             }
 
+            // Research mode button — switches right panel to Pattern Synthesis pipeline
+            Button {
+                text: "⚗ Research";
+                clicked => {
+                    root.app-state = AppState.Research;
+                    root.set-app-state(AppState.Research);
+                }
+            }
+
+            // Active mode indicator — updates reactively from app-state property
             Text {
-                text: root.app-state == AppState.Planning ? "● Planning"
+                text: root.app-state == AppState.Planning    ? "● Planning"
                     : root.app-state == AppState.Development ? "● Development"
-                    : "● Browser Dev";
-                color: accent;
+                    : root.app-state == AppState.BrowserDev  ? "● Browser Dev"
+                    : "● Research";
+                color: root.app-state == AppState.Research ? accent-research : accent;
                 font-size: 12px;
                 vertical-alignment: center;
             }
@@ -133,7 +179,7 @@ export component MainWindow inherits Window {
             spacing: 12px;
             vertical-stretch: 1;
 
-            // ── LEFT: Chat panel ──────────────────────────────────────────────
+            // ── LEFT: Chat panel (always visible) ─────────────────────────────
             Rectangle {
                 width: 480px;
                 background: bg-panel;
@@ -229,8 +275,9 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // ── RIGHT: Deploy log + Status Console ────────────────────────────
-            VerticalLayout {
+            // ── RIGHT: Normal panels (hidden when in Research mode) ────────────
+            // Communication: visible binding reacts to app-state property change
+            if root.app-state != AppState.Research : VerticalLayout {
                 horizontal-stretch: 1;
                 spacing: 12px;
 
@@ -292,6 +339,143 @@ export component MainWindow inherits Window {
                                 font-family: "Consolas";
                                 wrap: word-wrap;
                             }
+                        }
+                    }
+                }
+            }
+
+            // ── RIGHT: Research / Pattern Synthesis panel ──────────────────────
+            // Shown only when app-state == AppState.Research.
+            //
+            // Communication paths:
+            //   [Browse] → select-synthesis-target() → [Python] on_select_synthesis_target
+            //              → tkinter filedialog → window.synthesis-target updated
+            //   [Begin Deconstruction] → begin-deconstruction()
+            //              → [Python] on_begin_deconstruction
+            //              → SynthesisAgent(target, output_lib, progress_cb) in thread
+            //              → dumpbin/javap + AI extraction → JSON pattern file saved
+            //              → synthesis-log appended via Slint timer loop
+            //              → synthesis-busy cleared when done
+            if root.app-state == AppState.Research : Rectangle {
+                horizontal-stretch: 1;
+                background: #0a0f0f;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: accent-research;
+
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 16px;
+
+                    // Header
+                    Text {
+                        text: "⚗ Learning_Library Building Process";
+                        color: accent-research;
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
+
+                    Text {
+                        text: "Pattern Synthesis — Deconstruct a target to extract Operative DNA for the Learning_Library.";
+                        color: #aaaaaa;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+
+                    // Target selection row
+                    // Communication: [Browse] → select-synthesis-target() → [Python] file dialog
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: "Target:";
+                            color: accent-research;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+
+                        // synthesis-target is written back by Python after the file dialog
+                        Text {
+                            text: root.synthesis-target == "" ? "(no target selected)" : root.synthesis-target;
+                            color: root.synthesis-target == "" ? #555555 : fg-text;
+                            font-size: 12px;
+                            font-family: "Consolas";
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+
+                        Button {
+                            text: "Browse…";
+                            enabled: !root.synthesis-busy;
+                            clicked => { root.select-synthesis-target(); }
+                        }
+                    }
+
+                    // Action buttons
+                    // Communication: [Begin Deconstruction] → begin-deconstruction()
+                    //                → [Python] SynthesisAgent.deconstruct() (threaded)
+                    //                → synthesis-log streamed, synthesis-busy toggled
+                    HorizontalLayout {
+                        spacing: 10px;
+
+                        Button {
+                            text: root.synthesis-busy ? "⏳ Running…" : "⚡ Begin Deconstruction";
+                            enabled: root.synthesis-target != "" && !root.synthesis-busy;
+                            clicked => { root.begin-deconstruction(); }
+                        }
+                    }
+
+                    // Synthesis Progress Console
+                    // Communication: synthesis-log written by Python progress_cb via Slint timer
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #0d1212;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #1a3a3a;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 6px;
+
+                            Text {
+                                text: "Synthesis Progress:";
+                                color: #888888;
+                                font-size: 11px;
+                            }
+
+                            ScrollView {
+                                vertical-stretch: 1;
+
+                                Text {
+                                    text: root.synthesis-log == "" ? "Awaiting target selection…" : root.synthesis-log;
+                                    color: root.synthesis-log == "" ? #444444 : accent-research;
+                                    font-size: 11px;
+                                    font-family: "Consolas";
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    // Output path indicator
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: "Pattern output:";
+                            color: #555555;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "Learning_Library\\Synthesized_Data\\";
+                            color: #445555;
+                            font-size: 10px;
+                            font-family: "Consolas";
+                            vertical-alignment: center;
                         }
                     }
                 }

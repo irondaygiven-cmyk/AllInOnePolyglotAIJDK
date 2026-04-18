@@ -96,6 +96,11 @@ GlassCard {
 
     Connections {
         target: backend
+        // onDeployLogUpdated: append incremental theme-operation log lines
+        // Path: backend.deployLogUpdated(str) → themeLogArea.append(str)
         function onDeployLogUpdated(log) { themeLogArea.append(log) }
+        // onDeployLogReset: full reset after an undo/redo
+        // Path: backend.deployLogReset(str) → themeLogArea.text = str
+        function onDeployLogReset(text) { themeLogArea.text = text }
     }
 }

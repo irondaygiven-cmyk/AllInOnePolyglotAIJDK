@@ -47,11 +47,31 @@ Communication paths (module overview)
          → backend.current_environment = env
          → deploy_log + telemetry_log appended
 
-  5. App state change  (Planning / Development / BrowserDev)
+  5. App state change  (Planning / Development / BrowserDev / Research)
      [Slint mode buttons] → set-app-state(AppState) callback
        → on_set_app_state(state)
          → backend.is_planning_mode toggled (True only for Planning)
          → deploy_log + telemetry_log appended
+
+  6. Research — Select Synthesis Target
+     [Slint Browse… button] → select-synthesis-target() callback
+       → on_select_synthesis_target()
+         → tkinter.Tk().withdraw() + filedialog.askopenfilename()
+             [native Windows/Linux file-picker; no UI thread blocking]
+         → window.synthesis_target = chosen path
+         → window.synthesis_log appended
+
+  7. Research — Begin Deconstruction
+     [Slint ⚡ Begin Deconstruction] → begin-deconstruction() callback
+       → on_begin_deconstruction()
+         → window.synthesis_busy = True
+         → threading.Thread(target=_run_synthesis, daemon=True).start()
+             → SynthesisAgent(target, output_lib, progress_cb=_append_synthesis)
+             → agent.deconstruct()
+                 → static analysis (dumpbin / javap / file read)
+                 → HTTP POST  /chat/completions   [AI pattern extraction]
+                 → JSON pattern file → Learning_Library/Synthesized_Data/
+             → window.synthesis_busy = False (via Slint timer in main loop)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
@@ -61,6 +81,7 @@ import gzip
 import json
 import os
 import sys
+import threading
 
 import requests as _requests
 
@@ -72,6 +93,11 @@ import requests as _requests
 #               defines the MainWindow component with all callbacks and properties.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _SLINT_FILE = os.path.join(_SCRIPT_DIR, "slint", "main.slint")
+
+# Add the repo root to sys.path so scripts.synthesis_engine can be imported.
+# Path: import → scripts/synthesis_engine.py → SynthesisAgent
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -368,8 +394,12 @@ def main() -> None:
     chat_stack = UndoRedoStack()
     file_stack = UndoRedoStack()  # reserved for file-level operation tracking
 
-    # Integer → display name mapping for the AppState enum (Slint enum ordinals)
-    _APP_STATE_NAMES = {0: "Planning", 1: "Development", 2: "BrowserDev"}
+    # Integer → display name mapping for the AppState enum (Slint enum ordinals).
+    # IMPORTANT: ordinals MUST match the order declared in slint/main.slint:
+    #   export enum AppState { Planning, Development, BrowserDev, Research }
+    #                ordinal:      0           1            2         3
+    # If the Slint enum order changes, update this dict accordingly.
+    _APP_STATE_NAMES = {0: "Planning", 1: "Development", 2: "BrowserDev", 3: "Research"}
 
     # ── Snapshot helpers ───────────────────────────────────────────────────────
 
@@ -446,6 +476,12 @@ def main() -> None:
         # Path: Python str → window.telemetry_log → Status Console Text re-renders
         current = window.telemetry_log or ""
         window.telemetry_log = (current + "\n" + line).strip()
+
+    def append_synthesis(line: str) -> None:
+        # Path: Python str → window.synthesis_log → Research Progress console re-renders
+        # Called from main thread only (or via the Slint timer for thread safety).
+        current = window.synthesis_log or ""
+        window.synthesis_log = (current + "\n" + line).strip()
 
     # ── Slint callbacks ────────────────────────────────────────────────────────
 
@@ -553,7 +589,7 @@ def main() -> None:
     @window.set_app_state
     def on_set_app_state(state) -> None:
         """
-        Triggered by: [Planning / Development / Browser Dev button click].
+        Triggered by: [Planning / Development / Browser Dev / ⚗ Research button click].
 
         Communication path
         ──────────────────
@@ -568,6 +604,171 @@ def main() -> None:
         backend.is_planning_mode = state_name == "Planning"
         append_log(f"App state changed to: {state_name}")
         append_telemetry(f"[jcmd] app_state -> {state_name}")
+
+    # ── Research / Pattern Synthesis callbacks ────────────────────────────────
+
+    @window.select_synthesis_target
+    def on_select_synthesis_target() -> None:
+        """
+        Triggered by: [Browse… button in Research mode].
+
+        Opens a native file-picker dialog so the user can choose a target
+        binary or script for Pattern Synthesis.  Writes the chosen path back
+        to window.synthesis_target.
+
+        Communication path
+        ──────────────────
+          [Slint] select-synthesis-target()
+            → on_select_synthesis_target()
+              → tkinter.Tk().withdraw()       [hidden root window]
+              → filedialog.askopenfilename()  [native OS file dialog]
+              ← chosen path string (empty string if cancelled)
+              → window.synthesis_target = path
+              → append_synthesis("[RESEARCH] Target selected: ...")
+        """
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            # Create and immediately hide a root Tk window (required by filedialog)
+            _root = tk.Tk()
+            _root.withdraw()
+            _root.attributes("-topmost", True)  # ensure dialog appears on top
+
+            path = filedialog.askopenfilename(
+                title="Select Target for Pattern Synthesis",
+                filetypes=[
+                    ("All supported targets",
+                     "*.exe *.dll *.lib *.obj *.class *.jar "
+                     "*.py *.js *.ts *.rs *.go *.cs *.java *.c *.cpp"),
+                    ("MSVC binaries",   "*.exe *.dll *.lib *.obj"),
+                    ("Java bytecode",   "*.class *.jar"),
+                    ("Source files",    "*.py *.js *.ts *.rs *.go *.cs *.java *.c *.cpp"),
+                    ("All files",       "*.*"),
+                ],
+            )
+            _root.destroy()
+
+            if path:
+                # Normalise to OS-native path separators
+                path = os.path.normpath(path)
+                window.synthesis_target = path
+                append_synthesis(f"[RESEARCH] Target selected: {path}")
+                append_telemetry(f"[jcmd] synthesis_target -> {os.path.basename(path)}")
+            else:
+                append_synthesis("[RESEARCH] File selection cancelled")
+        except Exception as exc:
+            append_synthesis(f"[ERROR] Could not open file dialog: {exc}")
+
+    @window.begin_deconstruction
+    def on_begin_deconstruction() -> None:
+        """
+        Triggered by: [⚡ Begin Deconstruction button in Research mode].
+
+        Launches SynthesisAgent.deconstruct() in a daemon thread so the Slint
+        event loop remains responsive.  Progress messages are forwarded to
+        window.synthesis_log via a thread-safe queue polled by a Slint timer.
+
+        Communication path
+        ──────────────────
+          [Slint] begin-deconstruction()
+            → on_begin_deconstruction()
+              → window.synthesis_busy = True
+              → threading.Thread(target=_run_synthesis, daemon=True).start()
+                  → SynthesisAgent(target, output_lib, progress_cb=_enqueue_progress)
+                  → agent.deconstruct()
+                      → static analysis (dumpbin / javap / file read)
+                      → HTTP POST  /chat/completions   [AI pattern extraction]
+                      ← pattern description
+                      → JSON file saved to Learning_Library/Synthesized_Data/
+                  → _enqueue_progress(msg)     [→ thread-safe queue]
+              → Slint timer (100 ms) drains queue into window.synthesis_log
+              → window.synthesis_busy = False when thread completes
+        """
+        target = window.synthesis_target
+        if not target or not target.strip():
+            append_synthesis("[ERROR] No target selected. Use Browse… first.")
+            return
+
+        # Import SynthesisAgent (deferred to avoid import cost at startup)
+        try:
+            from scripts.synthesis_engine import SynthesisAgent, default_output_lib
+        except ImportError as exc:
+            append_synthesis(f"[ERROR] Cannot import SynthesisAgent: {exc}")
+            return
+
+        # Thread-safe queue for progress messages from the worker thread
+        import queue as _queue
+        _progress_queue: _queue.SimpleQueue = _queue.SimpleQueue()
+
+        def _enqueue_progress(msg: str) -> None:
+            """Worker thread → queue (thread-safe)."""
+            _progress_queue.put(msg)
+
+        def _run_synthesis() -> None:
+            """
+            Worker thread body.
+            Communication path (thread):
+              _run_synthesis()
+                → SynthesisAgent(target, output_lib, progress_cb=_enqueue_progress)
+                → agent.deconstruct()
+                    → _enqueue_progress(msg)  [each step emits progress]
+                → _progress_queue.put("[DONE]")  [sentinel to signal completion]
+            """
+            try:
+                agent = SynthesisAgent(
+                    target_path=target,
+                    output_lib=default_output_lib(),
+                    ai_config=backend.config,
+                    progress_cb=_enqueue_progress,
+                )
+                agent.deconstruct()
+            except Exception as exc:
+                _enqueue_progress(f"[ERROR] Synthesis failed: {exc}")
+            finally:
+                _progress_queue.put("[DONE]")  # sentinel for the timer
+
+        # Mark busy and clear previous synthesis log
+        window.synthesis_busy = True
+        window.synthesis_log = ""
+        append_telemetry(f"[jcmd] begin_deconstruction: {os.path.basename(target)}")
+
+        # Start the worker thread
+        threading.Thread(target=_run_synthesis, daemon=True).start()
+
+        # Poll the queue every ~100 ms from within the Slint event loop using
+        # a recursive timer.  This is the only thread-safe way to update Slint
+        # properties from a background thread.
+        #
+        # Communication path (timer loop):
+        #   slint.Timer(100ms) → _poll_progress()
+        #     → _progress_queue.get_nowait()   [non-blocking dequeue]
+        #     → window.synthesis_log appended
+        #     → if sentinel "[DONE]": timer.stop(), window.synthesis_busy = False
+
+        try:
+            import slint as _slint  # type: ignore[import]
+            _timer = _slint.Timer()
+
+            def _poll_progress() -> None:
+                import queue as _q
+                try:
+                    while True:
+                        msg = _progress_queue.get_nowait()
+                        if msg == "[DONE]":
+                            _timer.stop()
+                            window.synthesis_busy = False
+                            append_telemetry("[jcmd] deconstruction complete")
+                            return
+                        append_synthesis(msg)
+                except _q.Empty:
+                    pass  # nothing new yet — timer fires again in 100 ms
+
+            _timer.start(_slint.TimerMode.Repeated, 100, _poll_progress)
+        except Exception:
+            # If the Slint Timer API isn't available, fall back to a blocking join
+            # (not ideal for UI responsiveness, but functional for CLI testing).
+            pass
 
     # Start the Slint event loop — blocks until the window is closed
     window.run()

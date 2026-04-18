@@ -268,6 +268,10 @@ class Backend(QObject):
         self._chat_stack = UndoRedoStack()
         self._file_stack = UndoRedoStack()
 
+        # Research / Pattern Synthesis state
+        # _synthesis_target: path chosen by selectSynthesisTarget(); empty until set
+        self._synthesis_target: str = ""
+
         self.current_theme = {
             "accent": "#00ff9d",
             "background": "#0a0a0a",
@@ -510,10 +514,19 @@ class Backend(QObject):
                 else:
                     self._emit_deploy_log(f"[file undo] Already absent: {path}")
             elif op == "delete":
-                # Undo a delete → re-create the file
+                # Undo a delete → re-create the file from saved content.
+                # content may be None if the original save didn't capture it
+                # (e.g. directory-level undo from createProjectWithBuildSystem).
+                if content is None:
+                    self._emit_deploy_log(
+                        f"[file undo] Cannot restore '{path}': no saved content "
+                        f"(the file was a directory-level operation). "
+                        f"Re-run the build step to recreate it."
+                    )
+                    return
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 with open(path, "wb") as fh:
-                    fh.write(content or b"")
+                    fh.write(content)
                 self._emit_deploy_log(f"[file undo] Restored: {path}")
             else:
                 self._emit_deploy_log(f"[file undo] Unknown op: {op}")
@@ -540,10 +553,16 @@ class Backend(QObject):
         op, path, content = snap.get("op"), snap.get("path"), snap.get("content")
         try:
             if op == "create":
-                # Redo a create → recreate the file
+                # Redo a create → recreate the file from saved content.
+                if content is None:
+                    self._emit_deploy_log(
+                        f"[file redo] Cannot recreate '{path}': no saved content "
+                        f"(directory-level operation). Re-run the build step."
+                    )
+                    return
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 with open(path, "wb") as fh:
-                    fh.write(content or b"")
+                    fh.write(content)
                 self._emit_deploy_log(f"[file redo] Recreated: {path}")
             elif op == "delete":
                 # Redo a delete → delete again
@@ -556,6 +575,98 @@ class Backend(QObject):
                 self._emit_deploy_log(f"[file redo] Unknown op: {op}")
         except Exception as exc:
             self._emit_deploy_log(f"[file redo] Error: {exc}")
+
+    # ── Research / Pattern Synthesis slots ────────────────────────────────────
+
+    @Slot()
+    def selectSynthesisTarget(self):
+        """
+        Open a native file dialog so the user can select a synthesis target.
+        The chosen path is emitted via deployLogUpdated and stored internally.
+
+        Communication path
+        ──────────────────
+          [QML Browse button] → backend.selectSynthesisTarget()
+            → QFileDialog.getOpenFileName(...)
+                [native OS file-picker dialog]
+            ← chosen path string
+            → self._synthesis_target = path
+            → deployLogUpdated.emit("[RESEARCH] Target selected: <path>")
+        """
+        try:
+            from PySide6.QtWidgets import QFileDialog
+            path, _ = QFileDialog.getOpenFileName(
+                None,
+                "Select Target for Pattern Synthesis",
+                "",
+                "All supported targets (*.exe *.dll *.lib *.class *.jar "
+                "*.py *.js *.ts *.rs *.go *.cs *.java *.c *.cpp);;"
+                "MSVC binaries (*.exe *.dll *.lib *.obj);;"
+                "Java bytecode (*.class *.jar);;"
+                "Source files (*.py *.js *.ts *.rs *.go *.cs *.java *.c *.cpp);;"
+                "All files (*.*)",
+            )
+            if path:
+                self._synthesis_target = os.path.normpath(path)
+                self._emit_deploy_log(f"[RESEARCH] Target selected: {self._synthesis_target}")
+            else:
+                self._emit_deploy_log("[RESEARCH] File selection cancelled")
+        except Exception as exc:
+            self._emit_deploy_log(f"[RESEARCH] File dialog error: {exc}")
+
+    @Slot()
+    def beginDeconstruction(self):
+        """
+        Launch SynthesisAgent on the currently selected target in a background thread.
+
+        Communication path
+        ──────────────────
+          [QML Begin Deconstruction button] → backend.beginDeconstruction()
+            → SynthesisAgent(target, output_lib, progress_cb)
+            → threading.Thread(target=agent.deconstruct, daemon=True).start()
+                → static analysis (dumpbin / javap / file read)
+                → HTTP POST  {base_url}/chat/completions   [AI extraction]
+                ← pattern description
+                → JSON pattern file saved to Learning_Library/Synthesized_Data/
+                → progress_cb(msg)
+                    → deployLogUpdated.emit(msg)    [QML log updated on each step]
+        """
+        target = getattr(self, "_synthesis_target", "")
+        if not target:
+            self._emit_deploy_log("[RESEARCH] No target selected. Use 'Select Target' first.")
+            return
+
+        try:
+            # Import deferred — synthesis_engine has no hard dependency on PySide6
+            from scripts.synthesis_engine import SynthesisAgent, default_output_lib
+        except ImportError as exc:
+            self._emit_deploy_log(f"[RESEARCH] Cannot import SynthesisAgent: {exc}")
+            return
+
+        self._emit_deploy_log(f"[RESEARCH] Starting Pattern Synthesis on: {target}")
+
+        def _run() -> None:
+            """
+            Worker thread body.
+            Communication path:
+              _run()
+                → SynthesisAgent.deconstruct()
+                    → each progress message → self._emit_deploy_log(msg)
+                        → deployLogUpdated.emit(msg) → [QML] log TextArea.append
+            """
+            try:
+                agent = SynthesisAgent(
+                    target_path=target,
+                    output_lib=default_output_lib(),
+                    ai_config=self.config,
+                    progress_cb=self._emit_deploy_log,
+                )
+                agent.deconstruct()
+            except Exception as exc:
+                self._emit_deploy_log(f"[RESEARCH] Synthesis error: {exc}")
+
+        import threading as _threading
+        _threading.Thread(target=_run, daemon=True).start()
 
     @Slot(str)
     def setEnvironment(self, env):
@@ -631,13 +742,12 @@ class Backend(QObject):
         Communication path
         ──────────────────
           [QML button] → backend.createProjectWithBuildSystem(type)
-            → _file_stack.push({"op":"create","path":project_dir,"content":None})
-                [records that this dir was created so undoFileOp can delete it]
             → sendToAgent(predefined prompt)   [→ AI → chatUpdated]
+            → _file_stack.push({"op":"create","path":project_dir,"content":None})
+                [recorded AFTER the send so the stack only has real attempts;
+                 content=None is intentional — undo will delete the directory
+                 rather than try to restore content that the AI wrote]
         """
-        # Record the file-level create operation for undo/redo (±20 cap)
-        project_dir = os.path.join(_SCRIPT_DIR, "generated_project")
-        self._file_stack.push({"op": "create", "path": project_dir, "content": None})
         if system_type == "xml":
             self.sendToAgent(
                 "Create a complete project using XML-based build configuration "
@@ -648,6 +758,9 @@ class Backend(QObject):
                 "Create a complete project using script-based build configuration "
                 "with GraalVM support."
             )
+        # Record AFTER the AI call so the stack entry only exists for real attempts
+        project_dir = os.path.join(_SCRIPT_DIR, "generated_project")
+        self._file_stack.push({"op": "create", "path": project_dir, "content": None})
 
     @Slot()
     def checkGit(self):
