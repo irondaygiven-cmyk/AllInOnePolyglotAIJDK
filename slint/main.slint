@@ -1,5 +1,39 @@
 // AllInOnePolyglotAIJDK - Slint UI
-// Unified GUI: AppState toggle + Status Console for persistent telemetry monitoring.
+// Unified GUI: AppState toggle + Status Console + Undo/Redo for persistent telemetry monitoring.
+//
+// ── Communication paths (Slint side) ────────────────────────────────────────
+//
+//  SEND button / LineEdit accepted
+//    → send-message(text) callback → [Python] on_send_message
+//        → UndoRedoStack.push(snapshot)          [saves state before action]
+//        → AIBackend.send(text) → HTTP POST to LM Studio endpoint
+//        → window.chat_messages / deploy_log / telemetry_log updated
+//        → window.can_undo_chat / can_redo_chat synced
+//
+//  ↩ Undo button (chat area)
+//    → undo-chat() callback → [Python] on_undo_chat
+//        → UndoRedoStack.undo()  [pop from undo stack, push to redo stack]
+//        → Restore snapshot → window.chat_messages, deploy_log, telemetry_log
+//        → AIBackend.chat_history restored
+//        → can_undo_chat / can_redo_chat updated
+//        Bounded to ±20 operations (UndoRedoStack.MAX_SIZE = 20)
+//
+//  ↪ Redo button (chat area)
+//    → redo-chat() callback → [Python] on_redo_chat
+//        → UndoRedoStack.redo()  [pop from redo stack, push back to undo]
+//        → Re-apply snapshot → window state restored
+//        Bounded to ±20 operations
+//
+//  Mode buttons (Planning / Development / Browser Dev)
+//    → set-app-state(AppState) callback → [Python] on_set_app_state
+//        → AIBackend.is_planning_mode toggled
+//        → deploy_log + telemetry_log updated
+//
+//  Environment ComboBox
+//    → set-environment(env) callback → [Python] on_set_environment
+//        → AIBackend.current_environment updated
+//
+// ────────────────────────────────────────────────────────────────────────────
 
 import { Button, LineEdit, ScrollView, ComboBox, VerticalBox, HorizontalBox } from "std-widgets.slint";
 
@@ -17,9 +51,16 @@ export component MainWindow inherits Window {
     background: #0a0a0a;
 
     // ── callbacks called from Python ─────────────────────────────────────────
+    // send-message  : [SEND button / Enter] → Python on_send_message → AI → reply
+    // set-environment: [ComboBox] → Python on_set_environment → AIBackend.current_environment
+    // set-app-state : [Mode buttons] → Python on_set_app_state → AIBackend.is_planning_mode
+    // undo-chat     : [↩ button] → Python on_undo_chat → UndoRedoStack.undo() → state restore
+    // redo-chat     : [↪ button] → Python on_redo_chat → UndoRedoStack.redo() → state restore
     callback send-message(string);
     callback set-environment(string);
     callback set-app-state(AppState);
+    callback undo-chat();   // restore previous chat state (up to 20 steps back)
+    callback redo-chat();   // re-apply undone chat state (up to 20 steps forward)
 
     // ── properties written from Python ───────────────────────────────────────
     in-out property <[ChatMessage]> chat-messages: [];
@@ -27,6 +68,10 @@ export component MainWindow inherits Window {
     in-out property <string> status-text: "Ready";
     in-out property <string> telemetry-log: "";
     in-out property <AppState> app-state: AppState.Planning;
+    // Undo/redo availability — set by Python after every mutating operation.
+    // Drives the enabled state of the ↩/↪ buttons below.
+    in-out property <bool> can-undo-chat: false;
+    in-out property <bool> can-redo-chat: false;
 
     // ── colours ──────────────────────────────────────────────────────────────
     property <color> accent: #00ff9d;
@@ -134,6 +179,10 @@ export component MainWindow inherits Window {
                     }
 
                     // Input row
+                    // Communication: [LineEdit accepted / SEND clicked] → send-message(text)
+                    //                 → [Python] on_send_message → AI → reply → chat_messages updated
+                    // Undo: [↩ clicked] → undo-chat() → [Python] on_undo_chat → state restored
+                    // Redo: [↪ clicked] → redo-chat() → [Python] on_redo_chat → state re-applied
                     HorizontalLayout {
                         spacing: 8px;
 
@@ -152,6 +201,22 @@ export component MainWindow inherits Window {
                                 root.send-message(chat-input.text);
                                 chat-input.text = "";
                             }
+                        }
+
+                        // ↩ Undo: reverts last chat exchange (up to 20 steps)
+                        // Enabled only when there is history to undo.
+                        Button {
+                            text: "↩";
+                            enabled: root.can-undo-chat;
+                            clicked => { root.undo-chat(); }
+                        }
+
+                        // ↪ Redo: re-applies a previously undone exchange (up to 20 steps)
+                        // Enabled only when there is undone history to redo.
+                        Button {
+                            text: "↪";
+                            enabled: root.can-redo-chat;
+                            clicked => { root.redo-chat(); }
                         }
                     }
 
