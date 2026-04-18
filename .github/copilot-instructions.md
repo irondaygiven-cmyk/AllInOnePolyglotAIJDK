@@ -66,3 +66,48 @@ monitor and the 'Glass_UI' from the Wasm project"*, follow this protocol:
             Slint: → window.synthesis_log (via Slint Timer queue drain)
             QML:   → backend.deployLogUpdated.emit(msg) → log TextArea.append
 ```
+
+## Dual Pattern Synthesis (Slint Core Library)
+`scripts/dual_synthesis.py` — `DualSynthesizer` class performs Pattern Synthesis on
+two Slint core subsystems without requiring a live target file.
+
+### Pattern A — `TEXT_GPU_ACCEL_V1`
+- **Source:** Slint `femtovg` renderer + software-renderer fallback
+- **Operative DNA:** sub-pixel glyph positioning, RGBA8 texture-atlas LRU cache,
+  FP16 SDF weights for NVIDIA RTX 5090 Tensor cores, Bresenham AA fallback
+- **JFR Hook:** `SLINT_FRAME_TIME_NS` jcmd counter (target ≤1 ms @ 1080p)
+- **File:** `Learning_Library/Synthesized_Data/Slint_Core/Pattern_Text_Glyph_Accel.json`
+- **Assembly:** `use patterns::text_gpu_accel;` + `SLINT_BACKEND=femtovg`
+
+### Pattern B — `MULTI_WINDOW_ORCH_V1`
+- **Source:** Slint window-manager abstraction layer
+- **Operative DNA:** `Arc<Mutex<AppState>>` shared-state Brain pattern,
+  `ComponentHandle::show()` non-blocking multi-window API,
+  `slint::invoke_from_event_loop()` for cross-thread property updates,
+  Tokio `broadcast::channel` for fan-out commands
+- **JFR Hook:** `SLINT_WINDOW_SYNC_LATENCY_NS` per window (alert >5 ms)
+- **File:** `Learning_Library/Synthesized_Data/Slint_Core/Pattern_Multi_Window_Orch.json`
+- **Assembly:** `use patterns::multi_window_orch;` + one thread per window
+
+### Dual Synthesis Communication Path
+```
+[Slint ⚡ Begin] / [QML ⚡ Begin Deconstruction]
+  → DualSynthesizer(output_path, progress_cb)
+  → .synthesize()
+      → _synthesize_text_pattern()
+          → _write_pattern("Pattern_Text_Glyph_Accel.json", data)
+              → json.dump → Slint_Core/Pattern_Text_Glyph_Accel.json
+      → _synthesize_window_pattern()
+          → _write_pattern("Pattern_Multi_Window_Orch.json", data)
+              → json.dump → Slint_Core/Pattern_Multi_Window_Orch.json
+      → progress_cb(msg) at each step
+          Slint: → window.synthesis_log
+          QML:   → backend.deployLogUpdated.emit → buildLogArea.append
+
+Assembly phase (Development Mode):
+  User: "Assemble a dashboard using TEXT_GPU_ACCEL_V1 and MULTI_WINDOW_ORCH_V1"
+    → AI reads both pattern JSON files
+    → uses Assembly_Snippet / Assembly_Instruction fields
+    → generates main.rs + ui.slint incorporating the Operative DNA
+    → Status Console (jcmd) validates patterns operative in new context
+```

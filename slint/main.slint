@@ -419,9 +419,11 @@ export component MainWindow inherits Window {
                     HorizontalLayout {
                         spacing: 10px;
 
-                        Button {
+                        ModernButton {
                             text: root.synthesis-busy ? "⏳ Running…" : "⚡ Begin Deconstruction";
-                            enabled: root.synthesis-target != "" && !root.synthesis-busy;
+                            // Enabled when not busy.  If no target is selected, the
+                            // backend falls back to DualSynthesizer (Slint Core patterns).
+                            enabled: !root.synthesis-busy;
                             clicked => { root.begin-deconstruction(); }
                         }
                     }

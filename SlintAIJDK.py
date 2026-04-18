@@ -686,10 +686,73 @@ def main() -> None:
               → window.synthesis_busy = False when thread completes
         """
         target = window.synthesis_target
+
         if not target or not target.strip():
-            append_synthesis("[ERROR] No target selected. Use Browse… first.")
+            # No target selected — run the built-in Slint core dual synthesis
+            append_synthesis(
+                "[RESEARCH] No target selected — running built-in Slint Core "
+                "Dual Pattern Synthesis (TEXT_GPU_ACCEL_V1 + MULTI_WINDOW_ORCH_V1)…"
+            )
+            try:
+                from scripts.dual_synthesis import DualSynthesizer
+            except ImportError as exc:
+                append_synthesis(f"[ERROR] Cannot import DualSynthesizer: {exc}")
+                return
+
+            # Import SynthesisAgent only for its progress-queue infrastructure
+            import queue as _dual_queue_mod
+            _dual_progress_queue: _dual_queue_mod.SimpleQueue = _dual_queue_mod.SimpleQueue()
+
+            def _enqueue_dual(msg: str) -> None:
+                _dual_progress_queue.put(msg)
+
+            def _run_dual() -> None:
+                """
+                Worker thread — DualSynthesizer.
+                Communication path:
+                  _run_dual()
+                    → DualSynthesizer.synthesize()
+                        → each progress msg → _enqueue_dual(msg) → _dual_progress_queue
+                    → _dual_progress_queue.put("[DONE]")  [sentinel]
+                """
+                try:
+                    ds = DualSynthesizer(progress_cb=_enqueue_dual)
+                    ds.synthesize()
+                except Exception as exc:
+                    _enqueue_dual(f"[ERROR] Dual synthesis failed: {exc}")
+                finally:
+                    _enqueue_dual("[DONE]")
+
+            window.synthesis_busy = True
+            window.synthesis_log = ""
+            append_telemetry("[jcmd] begin_deconstruction: Slint Core Dual Synthesis")
+            threading.Thread(target=_run_dual, daemon=True).start()
+
+            # Poll the queue — same Slint Timer pattern as the full SynthesisAgent path
+            try:
+                import slint as _slint  # type: ignore[import]
+                _dual_timer = _slint.Timer()
+                import queue as _q_dual
+
+                def _poll_dual() -> None:
+                    try:
+                        while True:
+                            msg = _dual_progress_queue.get_nowait()
+                            if msg == "[DONE]":
+                                _dual_timer.stop()
+                                window.synthesis_busy = False
+                                append_telemetry("[jcmd] dual_synthesis complete")
+                                return
+                            append_synthesis(msg)
+                    except _q_dual.Empty:
+                        pass
+
+                _dual_timer.start(_slint.TimerMode.Repeated, 100, _poll_dual)
+            except Exception:
+                pass
             return
 
+        # ── Full SynthesisAgent path (target file provided) ──────────────────
         # Import SynthesisAgent (deferred to avoid import cost at startup)
         try:
             from scripts.synthesis_engine import SynthesisAgent, default_output_lib

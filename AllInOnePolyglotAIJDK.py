@@ -617,11 +617,17 @@ class Backend(QObject):
     @Slot()
     def beginDeconstruction(self):
         """
-        Launch SynthesisAgent on the currently selected target in a background thread.
+        Launch Pattern Synthesis on the currently selected target in a background thread.
+
+        If no target has been selected via selectSynthesisTarget(), falls back to
+        DualSynthesizer which performs Pattern Synthesis on the two built-in Slint
+        core subsystems (TEXT_GPU_ACCEL_V1 and MULTI_WINDOW_ORCH_V1).
 
         Communication path
         ──────────────────
           [QML Begin Deconstruction button] → backend.beginDeconstruction()
+
+          Path A — target selected:
             → SynthesisAgent(target, output_lib, progress_cb)
             → threading.Thread(target=agent.deconstruct, daemon=True).start()
                 → static analysis (dumpbin / javap / file read)
@@ -630,14 +636,53 @@ class Backend(QObject):
                 → JSON pattern file saved to Learning_Library/Synthesized_Data/
                 → progress_cb(msg)
                     → deployLogUpdated.emit(msg)    [QML log updated on each step]
+
+          Path B — no target (fallback to DualSynthesizer):
+            → DualSynthesizer(progress_cb=self._emit_deploy_log)
+            → threading.Thread(target=ds.synthesize, daemon=True).start()
+                → _synthesize_text_pattern()
+                    → json.dump → Slint_Core/Pattern_Text_Glyph_Accel.json
+                → _synthesize_window_pattern()
+                    → json.dump → Slint_Core/Pattern_Multi_Window_Orch.json
+                → _emit_deploy_log(msg) at each step
+                    → deployLogUpdated.emit(msg)    [QML log updated on each step]
         """
         target = getattr(self, "_synthesis_target", "")
+
+        import threading as _threading
+
         if not target:
-            self._emit_deploy_log("[RESEARCH] No target selected. Use 'Select Target' first.")
+            # No target selected — run the built-in Slint core dual synthesis
+            self._emit_deploy_log(
+                "[RESEARCH] No target selected — running built-in Slint Core "
+                "Dual Pattern Synthesis (TEXT_GPU_ACCEL_V1 + MULTI_WINDOW_ORCH_V1)…"
+            )
+            try:
+                from scripts.dual_synthesis import DualSynthesizer
+            except ImportError as exc:
+                self._emit_deploy_log(f"[RESEARCH] Cannot import DualSynthesizer: {exc}")
+                return
+
+            def _run_dual() -> None:
+                """
+                Worker thread — DualSynthesizer.
+                Communication path:
+                  _run_dual()
+                    → DualSynthesizer.synthesize()
+                        → each progress message → self._emit_deploy_log(msg)
+                            → deployLogUpdated.emit(msg) → [QML] log TextArea.append
+                """
+                try:
+                    ds = DualSynthesizer(progress_cb=self._emit_deploy_log)
+                    ds.synthesize()
+                except Exception as exc:
+                    self._emit_deploy_log(f"[RESEARCH] Dual synthesis error: {exc}")
+
+            _threading.Thread(target=_run_dual, daemon=True).start()
             return
 
+        # Target selected — use full SynthesisAgent (static analysis + AI)
         try:
-            # Import deferred — synthesis_engine has no hard dependency on PySide6
             from scripts.synthesis_engine import SynthesisAgent, default_output_lib
         except ImportError as exc:
             self._emit_deploy_log(f"[RESEARCH] Cannot import SynthesisAgent: {exc}")
@@ -665,7 +710,6 @@ class Backend(QObject):
             except Exception as exc:
                 self._emit_deploy_log(f"[RESEARCH] Synthesis error: {exc}")
 
-        import threading as _threading
         _threading.Thread(target=_run, daemon=True).start()
 
     @Slot(str)
