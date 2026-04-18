@@ -490,7 +490,6 @@ def main() -> None:
 
     # ── Slint callbacks ────────────────────────────────────────────────────────
 
-    @window.send_message
     def on_send_message(text: str) -> None:
         """
         Triggered by: [SEND button click] or [LineEdit Enter key press].
@@ -527,7 +526,6 @@ def main() -> None:
         window.status_text = "Ready"
         _sync_undo_state()
 
-    @window.undo_chat
     def on_undo_chat() -> None:
         """
         Triggered by: [↩ Undo button click].
@@ -551,7 +549,6 @@ def main() -> None:
         append_telemetry("[jcmd] undo_chat: previous state restored")
         _sync_undo_state()
 
-    @window.redo_chat
     def on_redo_chat() -> None:
         """
         Triggered by: [↪ Redo button click].
@@ -575,7 +572,6 @@ def main() -> None:
         append_telemetry("[jcmd] redo_chat: state re-applied")
         _sync_undo_state()
 
-    @window.set_environment
     def on_set_environment(env: str) -> None:
         """
         Triggered by: [ComboBox selection change].
@@ -591,7 +587,6 @@ def main() -> None:
         append_log(f"Environment set to: {env}")
         append_telemetry(f"[jcmd] environment -> {env}")
 
-    @window.set_app_state
     def on_set_app_state(state) -> None:
         """
         Triggered by: [Planning / Development / Browser Dev / ⚗ Research button click].
@@ -612,7 +607,6 @@ def main() -> None:
 
     # ── Research / Pattern Synthesis callbacks ────────────────────────────────
 
-    @window.select_synthesis_target
     def on_select_synthesis_target() -> None:
         """
         Triggered by: [Browse… button in Research mode].
@@ -665,7 +659,6 @@ def main() -> None:
         except Exception as exc:
             append_synthesis(f"[ERROR] Could not open file dialog: {exc}")
 
-    @window.begin_deconstruction
     def on_begin_deconstruction() -> None:
         """
         Triggered by: [⚡ Begin Deconstruction button in Research mode].
@@ -837,6 +830,15 @@ def main() -> None:
             # If the Slint Timer API isn't available, fall back to a blocking join
             # (not ideal for UI responsiveness, but functional for CLI testing).
             pass
+
+    # Assign callbacks via direct property assignment (slint Python API).
+    window.send_message = on_send_message
+    window.undo_chat = on_undo_chat
+    window.redo_chat = on_redo_chat
+    window.set_environment = on_set_environment
+    window.set_app_state = on_set_app_state
+    window.select_synthesis_target = on_select_synthesis_target
+    window.begin_deconstruction = on_begin_deconstruction
 
     # Start the Slint event loop — blocks until the window is closed
     window.run()
