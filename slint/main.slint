@@ -1,7 +1,9 @@
 // AllInOnePolyglotAIJDK - Slint UI
-// Mirrors the core chat + environment + deploy-log layout of the QML version.
+// Unified GUI: AppState toggle + Status Console for persistent telemetry monitoring.
 
-import { Button, LineEdit, ScrollView, ListView, ComboBox } from "std-widgets.slint";
+import { Button, LineEdit, ScrollView, ComboBox, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export enum AppState { Planning, Development, BrowserDev }
 
 export struct ChatMessage {
     text: string,
@@ -9,130 +11,223 @@ export struct ChatMessage {
 }
 
 export component MainWindow inherits Window {
-    title: "AllInOnePolyglotAIJDK v3.3 - Slint";
     width: 1280px;
-    height: 800px;
+    height: 850px;
+    title: "AllInOnePolyglotAIJDK | Master Command Center";
     background: #0a0a0a;
 
     // ── callbacks called from Python ─────────────────────────────────────────
     callback send-message(string);
     callback set-environment(string);
+    callback set-app-state(AppState);
 
     // ── properties written from Python ───────────────────────────────────────
     in-out property <[ChatMessage]> chat-messages: [];
     in-out property <string> deploy-log: "";
     in-out property <string> status-text: "Ready";
+    in-out property <string> telemetry-log: "";
+    in-out property <AppState> app-state: AppState.Planning;
 
     // ── colours ──────────────────────────────────────────────────────────────
     property <color> accent: #00ff9d;
     property <color> bg-panel: #111111;
     property <color> fg-text: #e0e0e0;
 
-    HorizontalLayout {
+    VerticalLayout {
         padding: 12px;
-        spacing: 12px;
+        spacing: 10px;
 
-        // ── LEFT: Chat panel ─────────────────────────────────────────────────
-        Rectangle {
-            width: 480px;
-            background: bg-panel;
-            border-radius: 14px;
+        // ── TOP BAR: AppState toggle ──────────────────────────────────────────
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
 
-            VerticalLayout {
-                padding: 16px;
-                spacing: 12px;
+            Text {
+                text: "Mode:";
+                color: accent;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
 
-                // Environment selector
-                Text {
-                    text: "Environment";
-                    color: accent;
-                    font-size: 12px;
+            Button {
+                text: "Planning";
+                clicked => {
+                    root.app-state = AppState.Planning;
+                    root.set-app-state(AppState.Planning);
                 }
+            }
 
-                ComboBox {
-                    model: ["java", "python", "javascript", "rust", "csharp", "go"];
-                    selected => {
-                        root.set-environment(self.current-value);
+            Button {
+                text: "Development";
+                clicked => {
+                    root.app-state = AppState.Development;
+                    root.set-app-state(AppState.Development);
+                }
+            }
+
+            Button {
+                text: "Browser Dev";
+                clicked => {
+                    root.app-state = AppState.BrowserDev;
+                    root.set-app-state(AppState.BrowserDev);
+                }
+            }
+
+            Text {
+                text: root.app-state == AppState.Planning ? "● Planning"
+                    : root.app-state == AppState.Development ? "● Development"
+                    : "● Browser Dev";
+                color: accent;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+
+        // ── MAIN AREA ─────────────────────────────────────────────────────────
+        HorizontalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
+            // ── LEFT: Chat panel ──────────────────────────────────────────────
+            Rectangle {
+                width: 480px;
+                background: bg-panel;
+                border-radius: 14px;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+
+                    // Environment selector
+                    Text {
+                        text: "Environment";
+                        color: accent;
+                        font-size: 12px;
+                    }
+
+                    ComboBox {
+                        model: ["java", "python", "javascript", "rust", "csharp", "go"];
+                        selected => {
+                            root.set-environment(self.current-value);
+                        }
+                    }
+
+                    // Chat history
+                    ScrollView {
+                        vertical-stretch: 1;
+
+                        VerticalLayout {
+                            spacing: 10px;
+                            for msg in root.chat-messages: Rectangle {
+                                background: msg.is-user ? #1a2a1a : #1a1a2a;
+                                border-radius: 8px;
+                                padding: 10px;
+
+                                Text {
+                                    text: msg.text;
+                                    color: fg-text;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    // Input row
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        chat-input := LineEdit {
+                            placeholder-text: "Send directions to the Agent...";
+                            horizontal-stretch: 1;
+                            accepted => {
+                                root.send-message(self.text);
+                                self.text = "";
+                            }
+                        }
+
+                        Button {
+                            text: "SEND";
+                            clicked => {
+                                root.send-message(chat-input.text);
+                                chat-input.text = "";
+                            }
+                        }
+                    }
+
+                    // Status bar
+                    Text {
+                        text: root.status-text;
+                        color: #888888;
+                        font-size: 11px;
                     }
                 }
+            }
 
-                // Chat history
-                ScrollView {
+            // ── RIGHT: Deploy log + Status Console ────────────────────────────
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 12px;
+
+                // Deploy log
+                Rectangle {
                     vertical-stretch: 1;
+                    background: bg-panel;
+                    border-radius: 14px;
 
                     VerticalLayout {
+                        padding: 16px;
                         spacing: 10px;
-                        for msg in root.chat-messages: Rectangle {
-                            background: msg.is-user ? #1a2a1a : #1a1a2a;
-                            border-radius: 8px;
-                            padding: 10px;
+
+                        Text {
+                            text: "Deploy / Agent Log";
+                            color: accent;
+                            font-size: 12px;
+                        }
+
+                        ScrollView {
+                            vertical-stretch: 1;
 
                             Text {
-                                text: msg.text;
+                                text: root.deploy-log;
                                 color: fg-text;
-                                font-size: 13px;
+                                font-size: 12px;
+                                font-family: "Consolas";
                                 wrap: word-wrap;
                             }
                         }
                     }
                 }
 
-                // Input row
-                HorizontalLayout {
-                    spacing: 8px;
+                // Status Console (JFR / jcmd telemetry)
+                Rectangle {
+                    height: 180px;
+                    background: #0d0d0d;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: accent;
 
-                    chat-input := LineEdit {
-                        placeholder-text: "Send directions to the Agent...";
-                        horizontal-stretch: 1;
-                        accepted => {
-                            root.send-message(self.text);
-                            self.text = "";
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 6px;
+
+                        Text {
+                            text: "Status Console  [JFR / jcmd Telemetry]";
+                            color: accent;
+                            font-size: 11px;
                         }
-                    }
 
-                    Button {
-                        text: "SEND";
-                        clicked => {
-                            root.send-message(chat-input.text);
-                            chat-input.text = "";
+                        ScrollView {
+                            vertical-stretch: 1;
+
+                            Text {
+                                text: root.telemetry-log;
+                                color: #00cc7a;
+                                font-size: 11px;
+                                font-family: "Consolas";
+                                wrap: word-wrap;
+                            }
                         }
-                    }
-                }
-
-                // Status bar
-                Text {
-                    text: root.status-text;
-                    color: #888888;
-                    font-size: 11px;
-                }
-            }
-        }
-
-        // ── RIGHT: Deploy log ────────────────────────────────────────────────
-        Rectangle {
-            horizontal-stretch: 1;
-            background: bg-panel;
-            border-radius: 14px;
-
-            VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
-
-                Text {
-                    text: "Deploy / Agent Log";
-                    color: accent;
-                    font-size: 12px;
-                }
-
-                ScrollView {
-                    vertical-stretch: 1;
-
-                    Text {
-                        text: root.deploy-log;
-                        color: fg-text;
-                        font-size: 12px;
-                        font-family: "Consolas";
-                        wrap: word-wrap;
                     }
                 }
             }

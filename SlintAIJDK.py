@@ -128,6 +128,8 @@ def main():
     # Keep a local copy of the message list that we append to.
     messages = []
 
+    _APP_STATE_NAMES = {0: "Planning", 1: "Development", 2: "BrowserDev"}
+
     def append_message(text: str, is_user: bool):
         messages.append(slint.Struct({"text": text, "is-user": is_user}))
         window.chat_messages = messages
@@ -135,6 +137,10 @@ def main():
     def append_log(line: str):
         current = window.deploy_log or ""
         window.deploy_log = (current + "\n" + line).strip()
+
+    def append_telemetry(line: str):
+        current = window.telemetry_log or ""
+        window.telemetry_log = (current + "\n" + line).strip()
 
     @window.send_message
     def on_send_message(text: str):
@@ -145,12 +151,21 @@ def main():
         reply = backend.send(text)
         append_message(reply, is_user=False)
         append_log(f"[agent] responded ({len(reply)} chars)")
+        append_telemetry(f"[jcmd] send_message: {len(text)} chars in, {len(reply)} chars out")
         window.status_text = "Ready"
 
     @window.set_environment
     def on_set_environment(env: str):
         backend.current_environment = env
         append_log(f"Environment set to: {env}")
+        append_telemetry(f"[jcmd] environment -> {env}")
+
+    @window.set_app_state
+    def on_set_app_state(state):
+        state_name = _APP_STATE_NAMES.get(int(state), str(state))
+        backend.is_planning_mode = (state_name == "Planning")
+        append_log(f"App state changed to: {state_name}")
+        append_telemetry(f"[jcmd] app_state -> {state_name}")
 
     window.run()
 
