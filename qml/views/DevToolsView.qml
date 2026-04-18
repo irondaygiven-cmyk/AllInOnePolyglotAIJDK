@@ -3,6 +3,36 @@ import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import "../components"
 
+// DevToolsView.qml — Developer Tools & Security Analysis panel
+//
+// ── Communication paths ──────────────────────────────────────────────────────
+//
+//  All buttons → backend slot (PySide6 QObject) → effect + deployLogUpdated.emit
+//    → onDeployLogUpdated(log) → logArea.append(log)
+//
+//  "Recreate Page & Security Scan"
+//    → backend.recreateAndSecurityScan()
+//        → backend.sendToAgent(predefined prompt)
+//            → query_ai() → HTTP POST /chat/completions → AI reply
+//            → chatUpdated.emit(reply)    [chat panel receives reply]
+//            → deployLogUpdated.emit(...) [logArea updated below]
+//
+//  "View Categorized JS-Learning_Library"
+//    → backend.viewLibraries()
+//        → gzip.open("libraries_compressed.gz") → load JSON
+//        → deployLogUpdated.emit(summary)
+//
+//  "Execute Direct Command"
+//    → backend.sendDevToolsCommand(directCommand.text)
+//        → deployLogUpdated.emit("Executing: " + cmd)
+//
+//  Undo/Redo (chat-level, reflected here via deployLogReset)
+//    → backend.undoChatOp() / redoChatOp()   [called from main.qml]
+//        → deployLogReset.emit(full_log_str)
+//        → onDeployLogReset(text) → logArea.text = text   [resets this view]
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 GlassCard {
     ColumnLayout {
         anchors.fill: parent
@@ -53,6 +83,11 @@ GlassCard {
 
     Connections {
         target: backend
+        // onDeployLogUpdated: append incremental log lines
+        // Path: backend.deployLogUpdated(str) → logArea.append(str)
         function onDeployLogUpdated(log) { logArea.append(log) }
+        // onDeployLogReset: full reset after an undo/redo operation
+        // Path: backend.deployLogReset(str) → logArea.text = str
+        function onDeployLogReset(text) { logArea.text = text }
     }
 }

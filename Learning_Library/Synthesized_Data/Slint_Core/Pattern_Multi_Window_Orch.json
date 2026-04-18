@@ -1,0 +1,17 @@
+{
+  "Schema_Version": "1.0",
+  "ID": "MULTI_WINDOW_ORCH_V1",
+  "Name": "Multi-Window Orchestration",
+  "Origin_Source": "Slint window-manager abstraction layer",
+  "Synthesis_Date": "2026-04-18",
+  "Synthesis_Engine": "AllInOnePolyglotAIJDK/scripts/dual_synthesis.py",
+  "Deconstructed_Components": {
+    "Memory_Map": "Shared state pattern: Arc<Mutex<AppState>> cloned per window. Main thread (Brain) owns the Arc root; window threads hold weak references to avoid cycle leaks. IPC channel: std::sync::mpsc::channel<BrainCommand> — one sender per window, single receiver on Brain thread.",
+    "Slint_Adapter": "Each window is a ComponentHandle<T> (e.g. MainWindow::new()). Call handle.show() to make visible without blocking. Call slint::run_event_loop_until_quit() on the thread that owns the window — each window needs its own thread. Use invoke_from_event_loop() for cross-thread property updates.",
+    "Thread_Safety": "Arc<Mutex<AppState>> — safe to clone across threads. slint::invoke_from_event_loop(move || { ... }) is the only correct way to update Slint properties from a non-UI thread. Never call Slint setters directly from background threads.",
+    "JFR_Signature": "Attach jcmd counter SLINT_WINDOW_SYNC_LATENCY_NS per window. Alert threshold: >5 ms cross-window state sync indicates Mutex contention — consider lock-free RwLock for read-heavy state.",
+    "Tokio_Runtime": "#[tokio::main] on Brain process entry point. Spawn one tokio::task per window command processor. Use tokio::sync::broadcast::channel for fan-out commands (e.g. theme change broadcasts to all open windows)."
+  },
+  "Assembly_Snippet": "// Rust — multi-window Brain scaffold:\nuse std::sync::{Arc, Mutex};\nuse std::thread;\n\nlet shared_state = Arc::new(Mutex::new(AppState::default()));\n\n// Window A — Main Dashboard\nlet state_a = Arc::clone(&shared_state);\nthread::spawn(move || {\n    let window_a = MainDashboard::new().unwrap();\n    window_a.show().unwrap();\n    slint::run_event_loop_until_quit().unwrap();\n});\n\n// Window B — Telemetry Bar\nlet state_b = Arc::clone(&shared_state);\nthread::spawn(move || {\n    let window_b = TelemetryBar::new().unwrap();\n    window_b.show().unwrap();\n    slint::run_event_loop_until_quit().unwrap();\n});\n\n// Brain event loop — coordinates both windows\nslint::run_event_loop().unwrap();",
+  "Assembly_Instruction": "Import via 'use patterns::multi_window_orch;' in main.rs. Wrap AppState in Arc<Mutex<T>>; spawn one thread per window; use slint::invoke_from_event_loop() for all cross-thread updates."
+}

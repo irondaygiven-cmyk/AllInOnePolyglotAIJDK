@@ -1,7 +1,61 @@
 // AllInOnePolyglotAIJDK - Slint UI
-// Mirrors the core chat + environment + deploy-log layout of the QML version.
+// Unified GUI: AppState toggle + Status Console + Undo/Redo +
+//              Research / Pattern Synthesis module.
+//
+// ── Communication paths (Slint side) ────────────────────────────────────────
+//
+//  SEND button / LineEdit accepted
+//    → send-message(text) callback → [Python] on_send_message
+//        → UndoRedoStack.push(snapshot)          [saves state before action]
+//        → AIBackend.send(text) → HTTP POST to LM Studio endpoint
+//        → window.chat_messages / deploy_log / telemetry_log updated
+//        → window.can_undo_chat / can_redo_chat synced
+//
+//  ↩ Undo button (chat area)
+//    → undo-chat() callback → [Python] on_undo_chat
+//        → UndoRedoStack.undo()  [pop from undo stack, push to redo stack]
+//        → Restore snapshot → window.chat_messages, deploy_log, telemetry_log
+//        → AIBackend.chat_history restored
+//        → can_undo_chat / can_redo_chat updated
+//        Bounded to ±20 operations (UndoRedoStack.MAX_SIZE = 20)
+//
+//  ↪ Redo button (chat area)
+//    → redo-chat() callback → [Python] on_redo_chat
+//        → UndoRedoStack.redo()  [pop from redo stack, push back to undo]
+//        → Re-apply snapshot → window state restored
+//        Bounded to ±20 operations
+//
+//  Mode buttons (Planning / Development / Browser Dev / Research)
+//    → set-app-state(AppState) callback → [Python] on_set_app_state
+//        → AIBackend.is_planning_mode toggled
+//        → deploy_log + telemetry_log updated
+//
+//  Environment ComboBox
+//    → set-environment(env) callback → [Python] on_set_environment
+//        → AIBackend.current_environment updated
+//
+//  ── Research / Pattern Synthesis paths ──────────────────────────────────────
+//
+//  Browse / Select Target for Synthesis button  (Research mode)
+//    → select-synthesis-target() callback → [Python] on_select_synthesis_target
+//        → tkinter filedialog.askopenfilename()    [native file picker]
+//        → window.synthesis-target updated with chosen path
+//
+//  Begin Deconstruction button  (Research mode)
+//    → begin-deconstruction() callback → [Python] on_begin_deconstruction
+//        → SynthesisAgent(target, output_lib, progress_cb)
+//        → background thread: deconstruct()
+//            → dumpbin /EXPORTS or javap -c   [static analysis tool]
+//            → AI POST /chat/completions       [LM Studio pattern extraction]
+//            → JSON pattern file written to Learning_Library\Synthesized_Data\
+//            → progress_cb(msg) → window.synthesis-log appended (via Slint timer)
+//        → window.synthesis-busy = true while running, false when done
+//
+// ────────────────────────────────────────────────────────────────────────────
 
-import { Button, LineEdit, ScrollView, ComboBox } from "std-widgets.slint";
+import { Button, LineEdit, ScrollView, ComboBox, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export enum AppState { Planning, Development, BrowserDev, Research }
 
 export struct ChatMessage {
     text: string,
@@ -9,64 +63,155 @@ export struct ChatMessage {
 }
 
 export component MainWindow inherits Window {
-    title: "AllInOnePolyglotAIJDK v3.3 - Slint";
     width: 1280px;
-    height: 800px;
+    height: 850px;
+    title: "AllInOnePolyglotAIJDK | Master Command Center";
     background: #0a0a0a;
 
     // ── callbacks called from Python ─────────────────────────────────────────
+    // send-message             : [SEND / Enter] → on_send_message → AI → reply
+    // set-environment          : [ComboBox]     → on_set_environment → backend
+    // set-app-state            : [Mode buttons] → on_set_app_state → backend
+    // undo-chat                : [↩ button]     → on_undo_chat → UndoRedoStack.undo()
+    // redo-chat                : [↪ button]     → on_redo_chat → UndoRedoStack.redo()
+    // select-synthesis-target  : [Browse button, Research mode]
+    //                            → on_select_synthesis_target → tkinter filedialog
+    //                            → synthesis-target property updated
+    // begin-deconstruction     : [Begin Deconstruction button, Research mode]
+    //                            → on_begin_deconstruction
+    //                            → SynthesisAgent.deconstruct() in a background thread
+    //                            → synthesis-log appended; synthesis-busy toggled
     callback send-message(string);
     callback set-environment(string);
+    callback set-app-state(AppState);
+    callback undo-chat();                 // restore previous chat state (up to 20 steps)
+    callback redo-chat();                 // re-apply undone chat state (up to 20 steps)
+    callback select-synthesis-target();   // open native file-picker; writes synthesis-target
+    callback begin-deconstruction();      // launch SynthesisAgent on synthesis-target
 
     // ── properties written from Python ───────────────────────────────────────
     in-out property <[ChatMessage]> chat-messages: [];
     in-out property <string> deploy-log: "";
     in-out property <string> status-text: "Ready";
+    in-out property <string> telemetry-log: "";
+    in-out property <AppState> app-state: AppState.Planning;
+    // Undo/redo availability — set by Python after every mutating operation.
+    // Drives the enabled state of the ↩/↪ buttons below.
+    in-out property <bool> can-undo-chat: false;
+    in-out property <bool> can-redo-chat: false;
+    // Research / Pattern Synthesis properties
+    in-out property <string> synthesis-target: "";    // path to target binary/script
+    in-out property <string> synthesis-log: "";       // streaming progress from SynthesisAgent
+    in-out property <bool>   synthesis-busy: false;   // true while deconstruction runs
 
     // ── colours ──────────────────────────────────────────────────────────────
     property <color> accent: #00ff9d;
+    property <color> accent-research: #00e0ff;  // cyan accent for Research mode
     property <color> bg-panel: #111111;
     property <color> fg-text: #e0e0e0;
 
-    HorizontalLayout {
+    VerticalLayout {
         padding: 12px;
-        spacing: 12px;
+        spacing: 10px;
 
-        // ── LEFT: Chat panel ─────────────────────────────────────────────────
-        Rectangle {
-            width: 480px;
-            background: bg-panel;
-            border-radius: 14px;
+        // ── TOP BAR: AppState toggle ──────────────────────────────────────────
+        // Communication: each button → set-app-state(AppState) → [Python] on_set_app_state
+        //                → AIBackend.is_planning_mode toggled (Planning only)
+        //                → deploy_log + telemetry_log updated
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
 
-            VerticalLayout {
-                padding: 16px;
-                spacing: 12px;
+            Text {
+                text: "Mode:";
+                color: accent;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
 
-                // Environment selector
-                Text {
-                    text: "Environment";
-                    color: accent;
-                    font-size: 12px;
+            Button {
+                text: "Planning";
+                clicked => {
+                    root.app-state = AppState.Planning;
+                    root.set-app-state(AppState.Planning);
                 }
+            }
 
-                ComboBox {
-                    model: ["java", "python", "javascript", "rust", "csharp", "go"];
-                    selected => {
-                        root.set-environment(self.current-value);
+            Button {
+                text: "Development";
+                clicked => {
+                    root.app-state = AppState.Development;
+                    root.set-app-state(AppState.Development);
+                }
+            }
+
+            Button {
+                text: "Browser Dev";
+                clicked => {
+                    root.app-state = AppState.BrowserDev;
+                    root.set-app-state(AppState.BrowserDev);
+                }
+            }
+
+            // Research mode button — switches right panel to Pattern Synthesis pipeline
+            Button {
+                text: "⚗ Research";
+                clicked => {
+                    root.app-state = AppState.Research;
+                    root.set-app-state(AppState.Research);
+                }
+            }
+
+            // Active mode indicator — updates reactively from app-state property
+            Text {
+                text: root.app-state == AppState.Planning    ? "● Planning"
+                    : root.app-state == AppState.Development ? "● Development"
+                    : root.app-state == AppState.BrowserDev  ? "● Browser Dev"
+                    : "● Research";
+                color: root.app-state == AppState.Research ? accent-research : accent;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+
+        // ── MAIN AREA ─────────────────────────────────────────────────────────
+        HorizontalLayout {
+            spacing: 12px;
+            vertical-stretch: 1;
+
+            // ── LEFT: Chat panel (always visible) ─────────────────────────────
+            Rectangle {
+                width: 480px;
+                background: bg-panel;
+                border-radius: 14px;
+
+                VerticalLayout {
+                    padding: 16px;
+                    spacing: 12px;
+
+                    // Environment selector
+                    Text {
+                        text: "Environment";
+                        color: accent;
+                        font-size: 12px;
                     }
-                }
 
-                // Chat history
-                ScrollView {
-                    vertical-stretch: 1;
+                    ComboBox {
+                        model: ["java", "python", "javascript", "rust", "csharp", "go"];
+                        selected => {
+                            root.set-environment(self.current-value);
+                        }
+                    }
 
-                    VerticalLayout {
-                        spacing: 10px;
-                        for msg in root.chat-messages: Rectangle {
-                            background: msg.is-user ? #1a2a1a : #1a1a2a;
-                            border-radius: 8px;
+                    // Chat history
+                    ScrollView {
+                        vertical-stretch: 1;
 
-                            VerticalLayout {
+                        VerticalLayout {
+                            spacing: 10px;
+                            for msg in root.chat-messages: Rectangle {
+                                background: msg.is-user ? #1a2a1a : #1a1a2a;
+                                border-radius: 8px;
                                 padding: 10px;
 
                                 Text {
@@ -78,64 +223,262 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
-                }
 
-                // Input row
-                HorizontalLayout {
-                    spacing: 8px;
+                    // Input row
+                    // Communication: [LineEdit accepted / SEND clicked] → send-message(text)
+                    //                 → [Python] on_send_message → AI → reply → chat_messages updated
+                    // Undo: [↩ clicked] → undo-chat() → [Python] on_undo_chat → state restored
+                    // Redo: [↪ clicked] → redo-chat() → [Python] on_redo_chat → state re-applied
+                    HorizontalLayout {
+                        spacing: 8px;
 
-                    chat-input := LineEdit {
-                        placeholder-text: "Send directions to the Agent...";
-                        horizontal-stretch: 1;
-                        accepted => {
-                            root.send-message(self.text);
-                            self.text = "";
+                        chat-input := LineEdit {
+                            placeholder-text: "Send directions to the Agent...";
+                            horizontal-stretch: 1;
+                            accepted => {
+                                root.send-message(self.text);
+                                self.text = "";
+                            }
+                        }
+
+                        Button {
+                            text: "SEND";
+                            clicked => {
+                                root.send-message(chat-input.text);
+                                chat-input.text = "";
+                            }
+                        }
+
+                        // ↩ Undo: reverts last chat exchange (up to 20 steps)
+                        // Enabled only when there is history to undo.
+                        Button {
+                            text: "↩";
+                            enabled: root.can-undo-chat;
+                            clicked => { root.undo-chat(); }
+                        }
+
+                        // ↪ Redo: re-applies a previously undone exchange (up to 20 steps)
+                        // Enabled only when there is undone history to redo.
+                        Button {
+                            text: "↪";
+                            enabled: root.can-redo-chat;
+                            clicked => { root.redo-chat(); }
                         }
                     }
 
-                    Button {
-                        text: "SEND";
-                        clicked => {
-                            root.send-message(chat-input.text);
-                            chat-input.text = "";
-                        }
+                    // Status bar
+                    Text {
+                        text: root.status-text;
+                        color: #888888;
+                        font-size: 11px;
                     }
-                }
-
-                // Status bar
-                Text {
-                    text: root.status-text;
-                    color: #888888;
-                    font-size: 11px;
                 }
             }
-        }
 
-        // ── RIGHT: Deploy log ────────────────────────────────────────────────
-        Rectangle {
-            horizontal-stretch: 1;
-            background: bg-panel;
-            border-radius: 14px;
+            // ── RIGHT: Normal panels (hidden when in Research mode) ────────────
+            // Communication: visible binding reacts to app-state property change
+            if root.app-state != AppState.Research : VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: 12px;
 
-            VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
+                // Deploy log
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: bg-panel;
+                    border-radius: 14px;
 
-                Text {
-                    text: "Deploy / Agent Log";
-                    color: accent;
-                    font-size: 12px;
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 10px;
+
+                        Text {
+                            text: "Deploy / Agent Log";
+                            color: accent;
+                            font-size: 12px;
+                        }
+
+                        ScrollView {
+                            vertical-stretch: 1;
+
+                            Text {
+                                text: root.deploy-log;
+                                color: fg-text;
+                                font-size: 12px;
+                                font-family: "Consolas";
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
                 }
 
-                ScrollView {
-                    vertical-stretch: 1;
+                // Status Console (JFR / jcmd telemetry)
+                Rectangle {
+                    height: 180px;
+                    background: #0d0d0d;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: accent;
+
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 6px;
+
+                        Text {
+                            text: "Status Console  [JFR / jcmd Telemetry]";
+                            color: accent;
+                            font-size: 11px;
+                        }
+
+                        ScrollView {
+                            vertical-stretch: 1;
+
+                            Text {
+                                text: root.telemetry-log;
+                                color: #00cc7a;
+                                font-size: 11px;
+                                font-family: "Consolas";
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── RIGHT: Research / Pattern Synthesis panel ──────────────────────
+            // Shown only when app-state == AppState.Research.
+            //
+            // Communication paths:
+            //   [Browse] → select-synthesis-target() → [Python] on_select_synthesis_target
+            //              → tkinter filedialog → window.synthesis-target updated
+            //   [Begin Deconstruction] → begin-deconstruction()
+            //              → [Python] on_begin_deconstruction
+            //              → SynthesisAgent(target, output_lib, progress_cb) in thread
+            //              → dumpbin/javap + AI extraction → JSON pattern file saved
+            //              → synthesis-log appended via Slint timer loop
+            //              → synthesis-busy cleared when done
+            if root.app-state == AppState.Research : Rectangle {
+                horizontal-stretch: 1;
+                background: #0a0f0f;
+                border-radius: 14px;
+                border-width: 1px;
+                border-color: accent-research;
+
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 16px;
+
+                    // Header
+                    Text {
+                        text: "⚗ Learning_Library Building Process";
+                        color: accent-research;
+                        font-size: 20px;
+                        font-weight: 700;
+                    }
 
                     Text {
-                        text: root.deploy-log;
-                        color: fg-text;
+                        text: "Pattern Synthesis — Deconstruct a target to extract Operative DNA for the Learning_Library.";
+                        color: #aaaaaa;
                         font-size: 12px;
-                        font-family: "Consolas";
                         wrap: word-wrap;
+                    }
+
+                    // Target selection row
+                    // Communication: [Browse] → select-synthesis-target() → [Python] file dialog
+                    HorizontalLayout {
+                        spacing: 8px;
+
+                        Text {
+                            text: "Target:";
+                            color: accent-research;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                        }
+
+                        // synthesis-target is written back by Python after the file dialog
+                        Text {
+                            text: root.synthesis-target == "" ? "(no target selected)" : root.synthesis-target;
+                            color: root.synthesis-target == "" ? #555555 : fg-text;
+                            font-size: 12px;
+                            font-family: "Consolas";
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+
+                        Button {
+                            text: "Browse…";
+                            enabled: !root.synthesis-busy;
+                            clicked => { root.select-synthesis-target(); }
+                        }
+                    }
+
+                    // Action buttons
+                    // Communication: [Begin Deconstruction] → begin-deconstruction()
+                    //                → [Python] SynthesisAgent.deconstruct() (threaded)
+                    //                → synthesis-log streamed, synthesis-busy toggled
+                    HorizontalLayout {
+                        spacing: 10px;
+
+                        ModernButton {
+                            text: root.synthesis-busy ? "⏳ Running…" : "⚡ Begin Deconstruction";
+                            // Enabled when not busy.  If no target is selected, the
+                            // backend falls back to DualSynthesizer (Slint Core patterns).
+                            enabled: !root.synthesis-busy;
+                            clicked => { root.begin-deconstruction(); }
+                        }
+                    }
+
+                    // Synthesis Progress Console
+                    // Communication: synthesis-log written by Python progress_cb via Slint timer
+                    Rectangle {
+                        vertical-stretch: 1;
+                        background: #0d1212;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: #1a3a3a;
+
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 6px;
+
+                            Text {
+                                text: "Synthesis Progress:";
+                                color: #888888;
+                                font-size: 11px;
+                            }
+
+                            ScrollView {
+                                vertical-stretch: 1;
+
+                                Text {
+                                    text: root.synthesis-log == "" ? "Awaiting target selection…" : root.synthesis-log;
+                                    color: root.synthesis-log == "" ? #444444 : accent-research;
+                                    font-size: 11px;
+                                    font-family: "Consolas";
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+
+                    // Output path indicator
+                    HorizontalLayout {
+                        spacing: 6px;
+
+                        Text {
+                            text: "Pattern output:";
+                            color: #555555;
+                            font-size: 10px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: "Learning_Library\\Synthesized_Data\\";
+                            color: #445555;
+                            font-size: 10px;
+                            font-family: "Consolas";
+                            vertical-alignment: center;
+                        }
                     }
                 }
             }

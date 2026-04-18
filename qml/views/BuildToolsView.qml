@@ -9,20 +9,60 @@ GlassCard {
         anchors.margins: 32
         spacing: 20
 
-        Label {
-            text: "Development Build Tools"
-            font.pixelSize: 26
-            color: "#00ff9d"
+        GroupBox {
+            title: "File Operation History  [±20 operations]"
+            Layout.fillWidth: true
+            // Communication: buttons → backend.undoFileOp() / redoFileOp()
+            //   → _file_stack.undo() / .redo()
+            //   → file deleted / recreated on disk
+            //   → deployLogUpdated.emit(msg) → buildLogArea.append(msg)
+            ColumnLayout {
+                RowLayout {
+                    ModernButton {
+                        text: "↩ Undo File Op"
+                        onClicked: backend.undoFileOp()
+                    }
+                    ModernButton {
+                        text: "↪ Redo File Op"
+                        onClicked: backend.redoFileOp()
+                    }
+                }
+            }
         }
 
-        RowLayout {
-            ModernButton {
-                text: "Download Java Development Toolkit"
-                onClicked: backend.openJavaToolkitDownload()
+        GroupBox {
+            // Research / Pattern Synthesis — launch directly from Build Tools tab
+            // Communication: buttons → backend.selectSynthesisTarget() / beginDeconstruction()
+            //   selectSynthesisTarget  → QFileDialog → _synthesis_target set
+            //   beginDeconstruction    → SynthesisAgent thread → deployLogUpdated per step
+            title: "Pattern Synthesis  [Research]"
+            Layout.fillWidth: true
+            ColumnLayout {
+                RowLayout {
+                    ModernButton {
+                        text: "Select Synthesis Target"
+                        onClicked: backend.selectSynthesisTarget()
+                    }
+                    ModernButton {
+                        text: "⚡ Begin Deconstruction"
+                        onClicked: backend.beginDeconstruction()
+                    }
+                }
             }
-            ModernButton {
-                text: "Check Java Development Toolkit"
-                onClicked: backend.checkJavaToolkit()
+        }
+
+        GroupBox {
+            title: "Development Build Tools"
+            Layout.fillWidth: true
+            RowLayout {
+                ModernButton {
+                    text: "Download Java Development Toolkit"
+                    onClicked: backend.openJavaToolkitDownload()
+                }
+                ModernButton {
+                    text: "Check Java Development Toolkit"
+                    onClicked: backend.checkJavaToolkit()
+                }
             }
         }
 
@@ -99,7 +139,14 @@ GlassCard {
 
     Connections {
         target: backend
+        // onDeployLogUpdated: append incremental log lines
+        // Path: backend.deployLogUpdated(str) → buildLogArea.append(str)
         function onDeployLogUpdated(log) { buildLogArea.append(log) }
+        // onDeployLogReset: full log reset after an undo/redo
+        // Path: backend.deployLogReset(str) → buildLogArea.text = str
+        function onDeployLogReset(text)  { buildLogArea.text = text }
+        // onTerminalOutput: live process stdout/stderr
+        // Path: QProcess.readyReadStdout/err → terminalReadyRead() → terminalOutput.emit(str)
         function onTerminalOutput(text)  { terminalArea.append(text) }
     }
 }
